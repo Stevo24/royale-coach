@@ -34,8 +34,14 @@ jobs:
           sed -i "s/versionCode 1$/versionCode ${{ github.run_number }}/" android/app/build.gradle
 
       # The same key signs every build, so a new APK installs over the old one and keeps your data.
-      - name: Use the repository's signing key
-        run: mkdir -p ~/.android && cp android-signing/debug.keystore ~/.android/debug.keystore
+      # The key is stored encrypted; only the SIGNING_PASSWORD repository secret can unlock it.
+      - name: Unlock the signing key
+        env:
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          test -n "$SIGNING_PASSWORD" || { echo "::error::Add the SIGNING_PASSWORD secret (Settings > Secrets and variables > Actions)."; exit 1; }
+          mkdir -p ~/.android
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in android-signing/keystore.enc -out ~/.android/debug.keystore -pass env:SIGNING_PASSWORD
 
       - name: Build the APK
         run: cd android && ./gradlew assembleDebug --no-daemon

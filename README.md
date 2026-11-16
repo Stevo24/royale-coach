@@ -29,7 +29,7 @@ To update, install the newer APK over the old one; your data is kept. Uninstalli
 
 The same files also work as a web page: turn on **Settings → Pages → Branch: main** and open `https://stevo24.github.io/royale-coach/`.
 
-The repository only holds the app's code. Your keys and battle data are typed into the app and never leave your phone. `android-signing/debug.keystore` is a signing key used only so updates install over each other; because it is public, only install APKs from this repository's Releases page.
+The repository only holds the app's code. Your keys and battle data are typed into the app and never leave your phone. The signing key in `android-signing/keystore.enc` is encrypted; only the `SIGNING_PASSWORD` repository secret can unlock it, so nobody else can sign an update for your app. Keep that password somewhere safe: without it, future builds can't install over the app you already have.
 
 ## First run
 
