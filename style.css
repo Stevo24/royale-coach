@@ -238,5 +238,5 @@ a.btn { text-decoration: none; }
 .line:first-of-type { border-top: 0; }
 .line .score { font-weight: 800; }
 .line .what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.week { display: grid; grid-template-columns: 1fr 70px 44px 52px; gap: 8px; align-items: center; padding: 6px 0; }
+.week { display: grid; grid-template-columns: 1fr 50px 40px 48px 44px; gap: 8px; align-items: center; padding: 6px 0; }
 .week .pct, .week .tr { text-align: right; font-weight: 700; font-size: 13px; }

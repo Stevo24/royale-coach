@@ -4,6 +4,8 @@ A personal Clash Royale coach that runs entirely on your phone. There is no serv
 
 - **Matchup verdict per game:** Favored / Even / Unfavored, with the reasons (card levels, hard counters to each win condition, anti-air, your own history against that deck).
 - **How you played:** a grade measured against the matchup, plus specific fixes.
+- **Skill Score (0-100):** how well you play compared with what your matchups predicted. 50 is par. It is built from three visible parts: results vs expectation, elixir leaked, and crown margin. It compares you with your own matchups, not with other players.
+- **Elo rating:** starts at 1500 (a typical opponent at your trophy range) and moves after every game, by more when the matchup was against you. Tracked per battle, per session and week by week.
 - **Session and insights:** streaks, tilt alert, win rate by matchup verdict, by opponent win condition and archetype, nemesis cards, upgrade priorities, week-by-week history.
 - **Deck recommendations per mode:** Trophy Road, Ranked, Challenges, Clan War. Samples what the top 40 Ranked players are playing and ranks those decks for your collection (cards owned, your levels, evolutions, closeness to your current deck, your worst matchup).
 - **In-depth coaching (optional):** pick a screen recording after a game; frames are extracted on the phone and sent to Claude with your own API key for a moment-by-moment breakdown. Always post-game. The video is never stored or uploaded whole.
@@ -49,6 +51,7 @@ js/history.js    The three history tiers
 js/cards.js      Card knowledge: win conditions, counters, anti-air (edit freely)
 js/analysis.js   Matchup verdict, grade, tips
 js/insights.js   Session and long-term stats
+js/skill.js      Skill Score and Elo summary
 js/decks.js      Deck recommendations per game mode
 js/video.js      Frame extraction from a recording
 js/coach.js      Claude review of a recording

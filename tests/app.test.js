@@ -8,13 +8,14 @@ import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTra
 import { insights, worstMatchup } from "../js/insights.js";
 import { recommend, sampleRows, slimPlayer } from "../js/decks.js";
 import { buildRequest, parseReport } from "../js/coach.js";
+import { eloSummary, skillScore } from "../js/skill.js";
 import { normalizeTag } from "../js/api.js";
 
 const catalog = makeCatalog(fx.cardsPayload());
 const slimLog = (log) => log.filter(isOneVOne).map((b) => slim(b, catalog));
 const now = Date.now();
 const recent = ingest(emptyHistory(), slimLog(fx.battlelog(now)), catalog).history;
-const analyzed = analyzeAll(recent.full, {}, catalog);
+const analyzed = analyzeAll(recent.full, {}, catalog, 1500);
 
 test("skips 2v2, orders newest first, converts levels", () => {
   assert.equal(analyzed.length, 12);
@@ -62,7 +63,7 @@ test("maxed cards are never suggested for upgrade", () => {
   const atLevel = (level) => {
     const log = fx.battlelog(now);
     for (const b of log.filter(isOneVOne)) for (const c of b.team[0].cards) c.level = level - (16 - c.maxLevel);
-    const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog);
+    const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog, 1500);
     return { a, deck: insights(a, catalog.levelCap).top_deck };
   };
   const maxed = atLevel(16);
@@ -73,8 +74,42 @@ test("maxed cards are never suggested for upgrade", () => {
   // one card short of max: only that card is suggested
   const log = fx.battlelog(now);
   for (const b of log.filter(isOneVOne)) b.team[0].cards.forEach((c, i) => { c.level = (i === 3 ? 15 : 16) - (16 - c.maxLevel); });
-  const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog);
+  const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog, 1500);
   assert.deepEqual(insights(a, catalog.levelCap).top_deck.upgrade_priority, [{ name: "Ice Spirit", level: 15 }]);
+});
+
+test("Elo: moves with results, more for upsets, and settles", () => {
+  const oldest = analyzed.at(-1);
+  assert.equal(oldest.elo.before, 1500);
+  assert.equal(oldest.result, "win");
+  assert.ok(oldest.elo.change > 0);
+  const lavaLoss = analyzed[0];                       // unfavored matchup: a loss costs little
+  const baitWin = analyzed.find((a) => a.me.crowns === 3);
+  assert.ok(lavaLoss.elo.change < 0 && lavaLoss.elo.change > -12);
+  assert.ok(lavaLoss.elo.expected < 50);
+  assert.equal(lavaLoss.elo.after - lavaLoss.elo.before, lavaLoss.elo.change);
+  assert.ok(baitWin.elo.change > 0);
+
+  // a player who wins 2 of every 3 even games settles near the rating that predicts 67%
+  const log = fx.longHistory(600, now);
+  for (const b of log) { b.opponent[0].cards = b.team[0].cards.map((c) => ({ ...c, evolutionLevel: 0 })); }
+  const mirror = analyzeAll(slimLog(log), {}, catalog, 1500);
+  assert.ok(mirror.every((b) => b.matchup.paper_score === 0));
+  const settled = mirror[0].elo.after;
+  assert.ok(settled > 1590 && settled < 1650, `settled at ${settled}`);
+});
+
+test("Skill score: 50 is par, rewards beating expectations", () => {
+  const s = skillScore(analyzed);
+  assert.ok(s.score >= 0 && s.score <= 100);
+  assert.equal(s.games, 12);
+  assert.equal(s.trend, null);                        // needs 40 games
+  assert.ok(Math.abs(s.edge - (s.actual_win_rate - s.expected_win_rate)) <= 1);
+  const wins = analyzed.filter((b) => b.result === "win");
+  const losses = analyzed.filter((b) => b.result === "loss");
+  assert.ok(skillScore(wins).score > 50 && skillScore(losses).score < 50);
+  assert.ok(skillScore(wins).score > s.score);
+  assert.equal(skillScore(wins.slice(0, 1)).label, "Solid"); // one game barely moves it off 50
 });
 
 test("re-syncing the same battle log adds nothing", () => {
@@ -103,15 +138,26 @@ test("history tiers: 100 full, 200 compact, the rest as daily totals", () => {
   assert.deepEqual(h.full[0].me.cards[0], { id: 26000021, level: 14, evolved: true });
   assert.equal(h.compact[0].me, undefined);
   assert.deepEqual(Object.keys(h.compact[0]).sort(),
-    ["archetype", "crowns", "grade", "id", "leak", "mode", "opponent", "result", "their_win_condition", "time", "trophies", "trophy_change", "verdict"]);
-  assert.deepEqual(Object.keys(Object.values(h.daily)[0]).sort(), ["games", "last", "losses", "trophies", "trophy_change", "wins"]);
+    ["archetype", "crowns", "elo", "grade", "id", "leak", "mode", "opponent", "result", "their_win_condition", "time", "trophies", "trophy_change", "verdict"]);
+  assert.deepEqual(Object.keys(Object.values(h.daily)[0]).sort(), ["elo", "games", "last", "losses", "trophies", "trophy_change", "wins"]);
 
   // older games still feed "your history vs X" and the weekly view
   assert.ok(Object.values(olderRecords(h)).reduce((n, r) => n + r[1], 0) === COMPACT_LIMIT);
-  const a = analyzeAll(h.full, olderRecords(h), catalog);
+  const a = analyzeAll(h.full, olderRecords(h), catalog, h.rating);
   assert.ok(a.at(-1).matchup.factors.some((f) => f.label.startsWith("Your history vs")));
   const weeks = weekly(h, a);
   assert.equal(weeks.reduce((n, w) => n + w.games, 0), total);
+  assert.ok(weeks.every((w) => Number.isInteger(w.elo)));
+
+  // Elo is continuous across the tiers: each full battle starts where the previous game ended
+  assert.equal(a.at(-1).elo.before, h.compact[0].elo);
+  for (let i = 0; i < a.length - 1; i++) assert.equal(a[i].elo.before, a[i + 1].elo.after);
+  // and matches a single pass over the same games with nothing aged out
+  const single = analyzeAll(all.slice().reverse(), {}, catalog, 1500);
+  assert.ok(Math.abs(single[0].elo.after - a[0].elo.after) <= 12, `${single[0].elo.after} vs ${a[0].elo.after}`);
+  const summary = eloSummary(h, a);
+  assert.equal(summary.current, a[0].elo.after);
+  assert.ok(summary.peak >= summary.current);
   assert.ok(weeks[0].week > weeks.at(-1).week);
 
   // stored size stays small no matter how long you play

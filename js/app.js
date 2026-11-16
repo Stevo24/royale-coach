@@ -7,6 +7,7 @@ import { analyzeAll, isOneVOne, slim } from "./analysis.js";
 import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTracked, weekly } from "./history.js";
 import { insights, worstMatchup } from "./insights.js";
 import { TOP_PLAYERS, recommend, sampleRows, slimPlayer } from "./decks.js";
+import { eloSummary, skillScore } from "./skill.js";
 import { extractFrames } from "./video.js";
 import { review } from "./coach.js";
 
@@ -20,6 +21,8 @@ const state = {
   reports: {},      // battle id -> coaching report
   analyzed: [],
   insights: null,
+  skill: null,      // Skill Score summary
+  elo: null,        // Elo summary
   mode: "ladder",
   coaching: {},     // battle id -> { progress } | { error } while a recording is processed
 };
@@ -67,8 +70,10 @@ const deckGrid = (cards) => `<div class="deck">${cards.map((c) => `
 
 // ---------- data ----------
 function derive() {
-  state.analyzed = state.catalog ? analyzeAll(state.history.full, olderRecords(state.history), state.catalog) : [];
+  state.analyzed = state.catalog ? analyzeAll(state.history.full, olderRecords(state.history), state.catalog, state.history.rating) : [];
   state.insights = insights(state.analyzed, state.catalog?.levelCap);
+  state.skill = state.analyzed.length ? skillScore(state.analyzed) : null;
+  state.elo = state.analyzed.length ? eloSummary(state.history, state.analyzed) : null;
 }
 
 async function sync() {
@@ -152,6 +157,7 @@ function renderSession() {
   const s = state.insights.session;
   const last = state.analyzed[0];
   const streak = `${{ win: "W", loss: "L", draw: "D" }[s.streak.kind]}${s.streak.length}`;
+  const sessionElo = state.elo.current - state.analyzed[s.games - 1].elo.before;
   el.innerHTML = `
     ${s.tilt_alert ? `<div class="alert">🧊 <b>Tilt check.</b> ${esc(s.tilt_alert)}</div>` : ""}
     <h2>Current session · started ${ago(s.started)}</h2>
@@ -162,6 +168,9 @@ function renderSession() {
       ${tile(streak, "Streak", s.streak.kind)}
       ${tile(s.three_crowns, "3-crowns")}
       ${tile(s.avg_leak, "Avg leak")}
+      ${tile(state.skill.score, "Skill score")}
+      ${tile(state.elo.current, "Elo")}
+      ${tile(signed(sessionElo), "Elo this session", sessionElo > 0 ? "win" : sessionElo < 0 ? "loss" : "")}
     </div>
 
     <h2>Last game · ${ago(last.time)}</h2>
@@ -194,7 +203,7 @@ function renderBattles() {
       <div class="body">
         <div class="top">
           <span class="score ${b.result}">${b.me.crowns}-${b.opponent.crowns}</span>
-          <span class="muted small">${b.me.trophy_change !== null ? signed(b.me.trophy_change) + " 🏆 · " : ""}${ago(b.time)}</span>
+          <span class="muted small">${b.me.trophy_change !== null ? signed(b.me.trophy_change) + " 🏆 · " : ""}${signed(b.elo.change)} Elo · ${ago(b.time)}</span>
         </div>
         <div class="opp">vs ${esc(b.opponent.name)} · ${esc(b.mode)}</div>
         <div class="mini-deck">${b.opponent.cards.map((c) => `<img src="${esc(c.icon)}" alt="" loading="lazy">`).join("")}</div>
@@ -277,6 +286,7 @@ function battleHtml(b) {
         <div class="grade big ${b.performance.grade}">${b.performance.grade}</div>
         <div><b>${b.performance.score}/100</b><div class="muted small">Graded against the matchup: winning a bad matchup scores higher than winning a good one.</div></div>
       </div>
+      <div class="small" style="margin:8px 0">Elo ${b.elo.before} → <b>${b.elo.after}</b> <span class="${b.elo.change > 0 ? "win" : b.elo.change < 0 ? "loss" : ""}">(${signed(b.elo.change)})</span> <span class="muted">· you were expected to win ${b.elo.expected}% of games like this</span></div>
       ${b.performance.tips.map(tipHtml).join("")}
     </div>
 
@@ -417,7 +427,32 @@ function renderInsights() {
     .filter((v) => ins.by_verdict[v].games)
     .map((v) => barRow({ name: `${v} (${ins.by_verdict[v].games})`, ...ins.by_verdict[v] })).join("");
   const weeks = weekly(state.history, state.analyzed);
+  const sk = state.skill, elo = state.elo;
+  const pts = (n) => (n > 0 ? "win" : n < 0 ? "loss" : "muted");
+  const edgeText = sk.edge > 0 ? `${sk.edge} points more than` : sk.edge < 0 ? `${-sk.edge} points less than` : "exactly what";
   el.innerHTML = `
+    <h2>Skill score</h2>
+    <div class="card">
+      <div class="row" style="gap:14px;flex-wrap:nowrap;align-items:flex-start">
+        <div class="grade big" style="color:var(--gold);width:76px">${sk.score}</div>
+        <div><b>${sk.label}</b>${sk.trend === null ? "" : ` <span class="${sk.trend > 0 ? "win" : sk.trend < 0 ? "loss" : "muted"}">${signed(sk.trend)} vs your previous 20 games</span>`}
+          <div class="muted small">0–100 over your last ${sk.games} games. 50 means you get the results your decks and levels should get; higher means you out-play them. It compares you with your own matchups, not with other players.</div></div>
+      </div>
+      <div class="tip"><div class="ic">🎯</div><div>You win <b>${sk.actual_win_rate}%</b>; your matchups predicted ${sk.expected_win_rate}%. That is ${edgeText} expected. <b class="${pts(sk.results_points)}">${signed(sk.results_points)} pts</b></div></div>
+      <div class="tip"><div class="ic">💧</div><div><b>${sk.avg_leak}</b> elixir leaked per game on average (1.5 is par). <b class="${pts(sk.elixir_points)}">${signed(sk.elixir_points)} pts</b></div></div>
+      <div class="tip"><div class="ic">👑</div><div><b>${signed(sk.crown_diff)}</b> crowns per game on average. <b class="${pts(sk.crown_points)}">${signed(sk.crown_points)} pts</b></div></div>
+    </div>
+
+    <h2>Elo rating</h2>
+    <div class="card">
+      <div class="tiles">
+        ${tile(elo.current, "Now")}
+        ${tile(elo.peak, "Peak")}
+        ${tile(signed(elo.last_25_change), "Last 25 games", elo.last_25_change > 0 ? "win" : elo.last_25_change < 0 ? "loss" : "")}
+      </div>
+      <div class="muted small" style="margin-top:10px">Starts at 1500, which stands for a typical opponent at your trophy range. Wins raise it and losses lower it, by more when the matchup was against you. Trophies show how high you've climbed; Elo shows how you're doing against the players you're matched with right now.</div>
+    </div>
+
     <h2>Last ${o.games} battles</h2>
     <div class="tiles">
       ${tile(o.win_rate + "%", "Win rate")}
@@ -453,12 +488,15 @@ function renderInsights() {
       <div class="muted small">${n.games} games</div></div>`).join("")}</div>` : ""}
 
     <h2>Week by week · all history</h2>
-    <div class="card">${weeks.map((w) => `
+    <div class="card">
+      <div class="week muted small"><div>Week of</div><div></div><div class="pct">Win</div><div class="tr">🏆</div><div class="tr">Elo</div></div>
+      ${weeks.map((w) => `
       <div class="week">
         <div>${new Date(w.week + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })} <span class="muted small">${w.wins}-${w.losses}</span></div>
         <div class="bar ${w.win_rate < 45 ? "low" : w.win_rate >= 55 ? "high" : ""}"><div style="width:${w.win_rate}%"></div></div>
         <div class="pct">${w.win_rate}%</div>
         <div class="tr ${w.trophy_change > 0 ? "win" : w.trophy_change < 0 ? "loss" : ""}">${signed(w.trophy_change)}</div>
+        <div class="tr">${w.elo ?? "–"}</div>
       </div>`).join("")}</div>`;
 }
 
@@ -545,7 +583,7 @@ async function start() {
     ["config", "history", "player", "catalog", "meta", "reports"].map(db.load),
   );
   Object.assign(state, {
-    config: config ?? null, history: history ?? emptyHistory(), player: player ?? null,
+    config: config ?? null, history: { ...emptyHistory(), ...history }, player: player ?? null,
     catalog: catalog ?? null, meta: meta ?? null, reports: reports ?? {},
   });
   derive();

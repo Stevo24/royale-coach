@@ -117,16 +117,22 @@ export function matchup(me, opp, history) {
   if (wc && record && record[1] >= 5) {
     const [wins, games] = record;
     factors.push({
+      personal: true,
       label: `Your history vs ${wc}`,
       points: r2(clamp((wins / games - 0.5) * 4, -1.5, 1.5)),
       detail: `You were ${wins}-${games - wins} against ${wc} decks before this game.`,
     });
   }
   const score = r2(sum(factors.map((f) => f.points)));
+  // "On paper" leaves out your own track record, so skill measures aren't judged against themselves.
+  const paperScore = r2(sum(factors.filter((f) => !f.personal).map((f) => f.points)));
+  const chance = (s) => Math.round(100 / (1 + Math.exp(-s / 2.5)));
   return {
     verdict: score >= FAVORED_AT ? "Favored" : score <= -FAVORED_AT ? "Unfavored" : "Even",
     score,
-    estimated_win_chance: Math.round(100 / (1 + Math.exp(-score / 2.5))),
+    estimated_win_chance: chance(score),
+    paper_score: paperScore,
+    paper_win_chance: chance(paperScore),
     factors,
   };
 }
@@ -138,7 +144,7 @@ const resultOf = (me, opp) => (me.crowns > opp.crowns ? "win" : me.crowns < opp.
 // Graded against expectation: beating a bad matchup scores higher than winning a good one.
 function performance(result, me, opp, mu, maxLevel) {
   const actual = { win: 1, draw: 0.5, loss: 0 }[result];
-  let score = 50 + (actual - mu.estimated_win_chance / 100) * 40;
+  let score = 50 + (actual - mu.paper_win_chance / 100) * 40;
   score += (me.crowns - opp.crowns) * 3;
   score -= clamp(me.elixir_leaked - 1, 0, 10) * 2;
   const hp = me.towers_hp_total + opp.towers_hp_total;
@@ -195,18 +201,35 @@ function tips(result, me, opp, mu, maxLevel) {
   return out;
 }
 
+// --- rating -----------------------------------------------------------------
+// Elo-style rating against the field you are matched with. 1500 is a typical opponent at
+// your trophy range. The matchup (levels, counters) acts as a handicap, so beating a bad
+// matchup gains more than winning a good one, and the rating settles where your results do.
+export const START_RATING = 1500;
+const K_FACTOR = 24;
+const ELO_PER_MATCHUP_POINT = 400 / (2.5 * Math.LN10); // same curve as estimated_win_chance
+
+const expectedScore = (rating, matchupScore) =>
+  1 / (1 + 10 ** (-(rating - START_RATING + matchupScore * ELO_PER_MATCHUP_POINT) / 400));
+
 // --- full pass --------------------------------------------------------------
 
 // battles: stored slim battles, newest first. olderRecords: {winCondition: [wins, games]}
-// from games that are no longer kept in full. Returns analyzed battles, newest first.
-export function analyzeAll(battles, olderRecords, catalog) {
+// from games that are no longer kept in full. baseRating: your rating before the oldest
+// of these battles. Returns analyzed battles, newest first.
+export function analyzeAll(battles, olderRecords, catalog, baseRating) {
   const history = structuredClone(olderRecords);
+  let rating = baseRating;
   const results = [];
   for (const b of [...battles].reverse()) {
     const me = enrich(b.me, catalog), opp = enrich(b.opponent, catalog);
     const result = resultOf(me, opp);
     const mu = matchup(me, opp, history);
-    results.push({ ...b, me, opponent: opp, result, matchup: mu, performance: performance(result, me, opp, mu, catalog.levelCap) });
+    const expected = expectedScore(rating, mu.paper_score);
+    const next = rating + K_FACTOR * ({ win: 1, draw: 0.5, loss: 0 }[result] - expected);
+    const elo = { before: Math.round(rating), after: Math.round(next), change: Math.round(next) - Math.round(rating), expected: Math.round(expected * 100), exact: next };
+    rating = next;
+    results.push({ ...b, me, opponent: opp, result, matchup: mu, elo, performance: performance(result, me, opp, mu, catalog.levelCap) });
     const wc = opp.main_win_condition;
     if (wc) {
       const record = (history[wc] ??= [0, 0]);

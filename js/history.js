@@ -2,12 +2,13 @@
 //   full    - newest 100 battles: decks, levels, towers, elixir (everything the coach uses)
 //   compact - battles 101-300: one line each
 //   daily   - older than that: totals per day
-import { analyzeAll } from "./analysis.js";
+import { START_RATING, analyzeAll } from "./analysis.js";
 
 export const FULL_LIMIT = 100;
 export const COMPACT_LIMIT = 200;
 
-export const emptyHistory = () => ({ full: [], compact: [], daily: {}, watermark: "" });
+// rating: your Elo before the oldest full-detail battle (carried forward as battles age out).
+export const emptyHistory = () => ({ full: [], compact: [], daily: {}, watermark: "", rating: START_RATING });
 
 const compactLine = (a) => ({
   id: a.id, time: a.time, mode: a.mode, result: a.result,
@@ -20,6 +21,7 @@ const compactLine = (a) => ({
   verdict: a.matchup.verdict,
   grade: a.performance.grade,
   leak: a.me.elixir_leaked,
+  elo: a.elo.after,
 });
 
 // Win/loss record per opponent win condition, from games no longer kept in full.
@@ -35,7 +37,7 @@ export function olderRecords(history) {
 }
 
 function foldIntoDay(daily, line) {
-  const day = (daily[line.time.slice(0, 10)] ??= { games: 0, wins: 0, losses: 0, trophy_change: 0, trophies: null, last: "" });
+  const day = (daily[line.time.slice(0, 10)] ??= { games: 0, wins: 0, losses: 0, trophy_change: 0, trophies: null, elo: null, last: "" });
   day.games += 1;
   day.wins += line.result === "win" ? 1 : 0;
   day.losses += line.result === "loss" ? 1 : 0;
@@ -43,6 +45,7 @@ function foldIntoDay(daily, line) {
   if (line.time > day.last) {
     day.last = line.time;
     day.trophies = line.trophies ?? day.trophies;
+    day.elo = line.elo ?? day.elo;
   }
 }
 
@@ -55,9 +58,11 @@ export function ingest(history, slimBattles, catalog) {
   let full = [...fresh, ...history.full].sort((a, b) => (a.time < b.time ? 1 : -1));
   let compact = history.compact;
   const daily = structuredClone(history.daily);
+  let rating = history.rating;
 
   if (full.length > FULL_LIMIT) {
-    const overflow = analyzeAll(full, olderRecords(history), catalog).slice(FULL_LIMIT);
+    const overflow = analyzeAll(full, olderRecords(history), catalog, rating).slice(FULL_LIMIT);
+    rating = overflow[0].elo.exact;
     compact = [...overflow.map(compactLine), ...compact];
     full = full.slice(0, FULL_LIMIT);
   }
@@ -65,7 +70,7 @@ export function ingest(history, slimBattles, catalog) {
     for (const line of compact.slice(COMPACT_LIMIT)) foldIntoDay(daily, line);
     compact = compact.slice(0, COMPACT_LIMIT);
   }
-  return { history: { full, compact, daily, watermark: full[0].time }, added: fresh.length };
+  return { history: { full, compact, daily, watermark: full[0].time, rating }, added: fresh.length };
 }
 
 const weekStart = (date) => {
@@ -74,20 +79,21 @@ const weekStart = (date) => {
   return d.toISOString().slice(0, 10);
 };
 
-// Week-by-week record across all three tiers, newest week first.
+// Week-by-week record across all three tiers, newest week first. elo is the rating at the end of the week.
 export function weekly(history, analyzedFull) {
   const weeks = {};
-  const add = (date, games, wins, losses, trophyChange) => {
-    const w = (weeks[weekStart(date)] ??= { games: 0, wins: 0, losses: 0, trophy_change: 0 });
+  const add = (time, games, wins, losses, trophyChange, elo) => {
+    const w = (weeks[weekStart(time.slice(0, 10))] ??= { games: 0, wins: 0, losses: 0, trophy_change: 0, elo: null, last: "" });
     w.games += games; w.wins += wins; w.losses += losses; w.trophy_change += trophyChange;
+    if (time > w.last) { w.last = time; w.elo = elo ?? w.elo; }
   };
-  const one = (time, result, change) => add(time.slice(0, 10), 1, result === "win" ? 1 : 0, result === "loss" ? 1 : 0, change ?? 0);
-  for (const b of analyzedFull) one(b.time, b.result, b.me.trophy_change);
-  for (const l of history.compact) one(l.time, l.result, l.trophy_change);
-  for (const [date, d] of Object.entries(history.daily)) add(date, d.games, d.wins, d.losses, d.trophy_change);
+  const one = (time, result, change, elo) => add(time, 1, result === "win" ? 1 : 0, result === "loss" ? 1 : 0, change ?? 0, elo);
+  for (const b of analyzedFull) one(b.time, b.result, b.me.trophy_change, b.elo.after);
+  for (const l of history.compact) one(l.time, l.result, l.trophy_change, l.elo);
+  for (const [date, d] of Object.entries(history.daily)) add(d.last || date, d.games, d.wins, d.losses, d.trophy_change, d.elo);
   return Object.entries(weeks)
     .sort(([a], [b]) => (a < b ? 1 : -1))
-    .map(([week, w]) => ({ week, ...w, win_rate: Math.round((100 * w.wins) / w.games) }));
+    .map(([week, { last, ...w }]) => ({ week, ...w, win_rate: Math.round((100 * w.wins) / w.games) }));
 }
 
 export const totalTracked = (history) =>
