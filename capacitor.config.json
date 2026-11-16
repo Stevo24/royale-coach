@@ -1,0 +1,8 @@
+{
+  "appId": "io.github.stevo24.royalecoach",
+  "appName": "Royale Coach",
+  "webDir": "www",
+  "plugins": {
+    "CapacitorHttp": { "enabled": true }
+  }
+}
