@@ -15,6 +15,9 @@ const FIRST_RUN_LOOKBACK_DAYS = 3;
 const QUEUE_KEPT = 5000;
 const CLAN_SCORE_BANDS = [10000, 30000, 50000, 70000]; // clans of different strength, for all trophy ranges
 
+// Show failures and the result on the workflow run's summary page.
+process.on("uncaughtException", (err) => { console.log(`::error::${err.message}`); process.exit(1); });
+
 if (!TOKEN) throw new Error("CR_API_TOKEN is not set. Add it as a repository secret.");
 if (!OUT) throw new Error("Usage: node crawler/crawl.js <output-dir>");
 
@@ -106,6 +109,7 @@ writeFileSync(statePath, JSON.stringify({ last_run: now.toISOString().replace(/\
 console.log(`this run: ${crawled} players crawled, ${run.players} scored, ${run.battles} new battles, ${run.skipped} decks skipped`);
 if (run.unscored) console.log(`could not score ${run.unscored} players, first reason: ${run.unscored_reason}`);
 console.log(`requests: ${stats.requests}, not found: ${stats.missing}, retried: ${stats.throttled}`);
+console.log(`::notice::Crawled ${crawled} players (${run.players} scored, ${run.unscored} not scored), ${run.battles} new battles, ${stats.requests} requests, ${stats.throttled} retried. Buckets: ${Object.entries(meta.buckets).sort().map(([k, b]) => `${k}=${b.deck_total}`).join(" ")}`);
 console.log(`published: ${meta.battles} battles over ${runs.length} run(s), ${JSON.stringify(meta).length} bytes`);
 for (const [key, b] of Object.entries(meta.buckets).sort()) {
   console.log(`  ${key.padEnd(10)} ${String(b.deck_total).padStart(7)} decks  ${String(b.players).padStart(5)} players  ${Object.keys(b.decks).length} decks published`);
