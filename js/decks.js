@@ -69,7 +69,7 @@ function fit(deck, [wins, games], mode, player, catalog, worstWincon) {
   const score = smoothed * 100 - gap * POINTS_PER_LEVEL - missingEvos.length * POINTS_PER_MISSING_EVO;
 
   const notes = [];
-  const lowest = [...slots].sort((a, b) => a.level - b.level).slice(0, 2).map((s) => `${s.name} (${s.level})`).join(", ");
+  const lowest = slots.filter((s) => s.level < (cap ?? catalog.levelCap)).sort((a, b) => a.level - b.level).slice(0, 2).map((s) => `${s.name} (${s.level})`).join(", ");
   if (shared === 8) notes.push("This is the deck you're using now.");
   else if (shared >= 6) notes.push(`Only ${8 - shared} card swap${shared === 6 ? "s" : ""} from your current deck.`);
   if (cap && gap > 0) notes.push(`Some cards are under the level ${cap} cap: ${lowest}.`);

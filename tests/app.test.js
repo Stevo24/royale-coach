@@ -47,7 +47,7 @@ test("grades and tips: blowout loss with leak and level gap is an F", () => {
 });
 
 test("insights: session, streak, tilt, worst matchup", () => {
-  const ins = insights(analyzed);
+  const ins = insights(analyzed, catalog.levelCap);
   assert.equal(ins.overall.games, 12);
   assert.equal(ins.session.games, 6);
   assert.deepEqual(ins.session.streak, { kind: "loss", length: 3 });
@@ -55,6 +55,26 @@ test("insights: session, streak, tilt, worst matchup", () => {
   assert.equal(ins.vs_win_conditions[0].name, "Golem");
   assert.equal(worstMatchup(ins, HARD_COUNTERS), "Golem");
   assert.ok(ins.nemesis_cards.every((n) => n.icon));
+});
+
+test("maxed cards are never suggested for upgrade", () => {
+  assert.equal(catalog.levelCap, 16);
+  const atLevel = (level) => {
+    const log = fx.battlelog(now);
+    for (const b of log.filter(isOneVOne)) for (const c of b.team[0].cards) c.level = level - (16 - c.maxLevel);
+    const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog);
+    return { a, deck: insights(a, catalog.levelCap).top_deck };
+  };
+  const maxed = atLevel(16);
+  assert.deepEqual(maxed.deck.upgrade_priority, []);
+  assert.equal(maxed.deck.max_level, 16);
+  assert.ok(!maxed.a.some((b) => b.performance.tips.some((t) => t.text.includes("Upgrade priority"))));
+
+  // one card short of max: only that card is suggested
+  const log = fx.battlelog(now);
+  for (const b of log.filter(isOneVOne)) b.team[0].cards.forEach((c, i) => { c.level = (i === 3 ? 15 : 16) - (16 - c.maxLevel); });
+  const a = analyzeAll(ingest(emptyHistory(), slimLog(log), catalog).history.full, {}, catalog);
+  assert.deepEqual(insights(a, catalog.levelCap).top_deck.upgrade_priority, [{ name: "Ice Spirit", level: 15 }]);
 });
 
 test("re-syncing the same battle log adds nothing", () => {

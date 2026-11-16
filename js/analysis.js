@@ -136,7 +136,7 @@ export function matchup(me, opp, history) {
 const resultOf = (me, opp) => (me.crowns > opp.crowns ? "win" : me.crowns < opp.crowns ? "loss" : "draw");
 
 // Graded against expectation: beating a bad matchup scores higher than winning a good one.
-function performance(result, me, opp, mu) {
+function performance(result, me, opp, mu, maxLevel) {
   const actual = { win: 1, draw: 0.5, loss: 0 }[result];
   let score = 50 + (actual - mu.estimated_win_chance / 100) * 40;
   score += (me.crowns - opp.crowns) * 3;
@@ -145,10 +145,10 @@ function performance(result, me, opp, mu) {
   if (hp) score += ((me.towers_hp_total - opp.towers_hp_total) / hp) * 10;
   score = Math.round(clamp(score, 0, 100));
   const grade = [["S", 85], ["A", 72], ["B", 58], ["C", 44], ["D", 30], ["F", 0]].find(([, cut]) => score >= cut)[0];
-  return { score, grade, tips: tips(result, me, opp, mu) };
+  return { score, grade, tips: tips(result, me, opp, mu, maxLevel) };
 }
 
-function tips(result, me, opp, mu) {
+function tips(result, me, opp, mu, maxLevel) {
   const out = [];
   const leak = me.elixir_leaked;
   if (leak <= 1) {
@@ -162,7 +162,7 @@ function tips(result, me, opp, mu) {
 
   const diff = me.avg_level - opp.avg_level;
   if (diff <= -1) {
-    const lowest = [...me.cards].sort((a, b) => a.level - b.level).slice(0, 2);
+    const lowest = me.cards.filter((c) => c.level < maxLevel).sort((a, b) => a.level - b.level).slice(0, 2);
     out.push({ kind: "fix", text: `You were under-leveled by ${Math.abs(diff).toFixed(1)} levels (roughly ${Math.round(Math.abs(diff) * 10)}% weaker stats). Upgrade priority: ${lowest.map((c) => `${c.name} (lvl ${c.level})`).join(", ")}.` });
   } else if (diff >= 1 && result === "loss") {
     out.push({ kind: "info", text: "You had the level advantage and still lost; this one came down to play." });
@@ -206,7 +206,7 @@ export function analyzeAll(battles, olderRecords, catalog) {
     const me = enrich(b.me, catalog), opp = enrich(b.opponent, catalog);
     const result = resultOf(me, opp);
     const mu = matchup(me, opp, history);
-    results.push({ ...b, me, opponent: opp, result, matchup: mu, performance: performance(result, me, opp, mu) });
+    results.push({ ...b, me, opponent: opp, result, matchup: mu, performance: performance(result, me, opp, mu, catalog.levelCap) });
     const wc = opp.main_win_condition;
     if (wc) {
       const record = (history[wc] ??= [0, 0]);

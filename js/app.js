@@ -68,7 +68,7 @@ const deckGrid = (cards) => `<div class="deck">${cards.map((c) => `
 // ---------- data ----------
 function derive() {
   state.analyzed = state.catalog ? analyzeAll(state.history.full, olderRecords(state.history), state.catalog) : [];
-  state.insights = insights(state.analyzed);
+  state.insights = insights(state.analyzed, state.catalog?.levelCap);
 }
 
 async function sync() {
@@ -438,7 +438,9 @@ function renderInsights() {
     <div class="card">
       ${deckGrid(deck.cards)}
       <div class="muted small" style="margin-top:10px">Avg leak with this deck: ${deck.avg_leak}</div>
-      <div style="margin-top:6px"><b>Upgrade next:</b> ${deck.upgrade_priority.map((c) => `${esc(c.name)} (${c.level})`).join(", ")}</div>
+      <div style="margin-top:6px">${deck.upgrade_priority.length
+        ? `<b>Upgrade next:</b> ${deck.upgrade_priority.map((c) => `${esc(c.name)} (${c.level})`).join(", ")}`
+        : `<b>Deck is maxed.</b> Every card is level ${deck.max_level}; nothing to upgrade.`}</div>
     </div>
 
     ${ins.vs_win_conditions.length ? `<h2>Vs win conditions · worst first</h2><div class="card">${ins.vs_win_conditions.map(barRow).join("")}</div>` : ""}

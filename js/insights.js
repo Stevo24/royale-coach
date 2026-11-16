@@ -60,7 +60,8 @@ function grouped(battles, keysOf, minGames) {
 
 const deckKey = (b) => b.me.cards.map((c) => c.name).sort().join(" · ");
 
-export function insights(battles) {
+// maxLevel: the highest card level in the game; cards already there are never suggested for upgrade.
+export function insights(battles, maxLevel) {
   const decks = grouped(battles, (b) => [deckKey(b)], 1).sort((a, b) => b.games - a.games);
   let topDeck = null;
   if (decks.length) {
@@ -69,7 +70,8 @@ export function insights(battles) {
     topDeck = {
       ...decks[0],
       cards: latest,
-      upgrade_priority: [...latest].sort((a, b) => a.level - b.level).slice(0, 3).map((c) => ({ name: c.name, level: c.level })),
+      max_level: maxLevel,
+      upgrade_priority: latest.filter((c) => c.level < maxLevel).sort((a, b) => a.level - b.level).slice(0, 3).map((c) => ({ name: c.name, level: c.level })),
       avg_leak: avg(deckBattles.map((b) => b.me.elixir_leaked)),
     };
   }
