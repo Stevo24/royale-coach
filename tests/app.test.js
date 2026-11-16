@@ -8,7 +8,8 @@ import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTra
 import { insights, worstMatchup } from "../js/insights.js";
 import { recommend, sampleRows, slimPlayer } from "../js/decks.js";
 import { buildRequest, parseReport } from "../js/coach.js";
-import { eloSummary, skillScore } from "../js/skill.js";
+import { eloSummary, rawScore, skillByDay, skillScore } from "../js/skill.js";
+import { buildBenchmarks, compare, deckInMeta, peerTags } from "../js/bench.js";
 import { normalizeTag } from "../js/api.js";
 
 const catalog = makeCatalog(fx.cardsPayload());
@@ -205,4 +206,45 @@ test("coaching request and report parsing", () => {
 test("player tag validation", () => {
   assert.equal(normalizeTag(" #2pp "), "2PP");
   assert.throws(() => normalizeTag("#ABC"), /not a valid player tag/);
+});
+
+test("skill history: one point per day played, kept after battles age out", () => {
+  const days = skillByDay(analyzed);
+  assert.equal(Object.keys(days).length, new Set(analyzed.map((b) => b.time.slice(0, 10))).size);
+  const newestDay = analyzed[0].time.slice(0, 10);
+  assert.equal(days[newestDay], Math.round(rawScore(analyzed.slice(0, 25))));
+  // ingest carries remembered days forward
+  const withDays = { ...recent, skill_days: { "2026-01-01": 44 } };
+  const later = ingest(withDays, slimLog([fx.battle(now + 60000, 0, "Bait", 14, 1, 0, 1, 1, "8QJ")]), catalog).history;
+  assert.deepEqual(later.skill_days, { "2026-01-01": 44 });
+});
+
+test("comparison with players at your level", () => {
+  assert.equal(peerTags(analyzed).length, 12);
+  // three peers: one wins everything, one loses everything, one is the fixture player
+  const allWins = fx.longHistory(15, now).map((b) => ({ ...b, team: [{ ...b.team[0], crowns: 2, elixirLeaked: 0.5 }], opponent: [{ ...b.opponent[0], crowns: 0 }] }));
+  const allLosses = fx.longHistory(15, now).map((b) => ({ ...b, team: [{ ...b.team[0], crowns: 0, elixirLeaked: 5 }], opponent: [{ ...b.opponent[0], crowns: 2 }] }));
+  const tooFew = fx.longHistory(4, now);
+  const bench = buildBenchmarks([allWins, allLosses, fx.battlelog(now), tooFew, []], catalog);
+  assert.equal(bench.peers.length, 3);                       // short and empty logs give no peer
+  assert.ok(bench.peers[0].score > 50 && bench.peers[1].score < 50);
+  assert.deepEqual(Object.keys(bench.peers[0]).sort(), ["leak", "score", "win_rate"]); // no names or tags kept
+  const games = Object.values(bench.wincons).reduce((n, r) => n + r[1], 0);
+  assert.equal(games, 15 + 15 + 12 + 4);
+
+  const c = compare(bench, analyzed);
+  assert.equal(c.peers, 3);
+  assert.equal(c.skill.you, Math.round(rawScore(analyzed.slice(0, 25))));
+  assert.equal(c.skill.ahead, 33);                           // ahead of the all-losses peer only (ties don't count)
+  assert.equal(c.leak.ahead, 33);
+  assert.equal(compare({ peers: [], wincons: {} }, analyzed), null);
+
+  const rows = sampleRows([fx.metaBattles(now)]);
+  const m = deckInMeta(bench, rows, catalog, analyzed, analyzed[0].me.cards);
+  assert.equal(m.win_condition, "Hog Rider");
+  assert.equal(m.you.games, 12);
+  assert.equal(m.level, null);                               // nobody in this sample faced a Hog deck
+  assert.ok(m.top.games > 0 && m.top.rank >= 1);
+  const golem = deckInMeta(bench, null, catalog, analyzed, analyzed.find((b) => b.opponent.main_win_condition === "Golem").opponent.cards);
+  assert.ok(golem.level.games > 0 && golem.level.usage > 0 && golem.top === null);
 });

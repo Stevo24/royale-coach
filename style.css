@@ -240,3 +240,19 @@ a.btn { text-decoration: none; }
 .line .what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .week { display: grid; grid-template-columns: 1fr 50px 40px 48px 44px; gap: 8px; align-items: center; padding: 6px 0; }
 .week .pct, .week .tr { text-align: right; font-weight: 700; font-size: 13px; }
+
+/* chart, comparisons */
+.chart { position: relative; margin-top: 8px; }
+.chart svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
+.chart .ax { font-size: 10px; fill: var(--muted); }
+.chart .val { font-size: 12px; font-weight: 800; fill: var(--text); }
+.chart-tip {
+  position: absolute; top: -6px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 3px 8px; font-size: 12px; white-space: nowrap; pointer-events: none;
+}
+.chart table { width: 100%; margin-top: 6px; border-collapse: collapse; }
+.chart td { padding: 3px 0; border-top: 1px solid var(--line); }
+.chart td:last-child { text-align: right; font-weight: 700; }
+.cmp > div { white-space: nowrap; }
+.cmp { display: grid; grid-template-columns: 1fr 0.55fr 0.9fr 1.35fr; gap: 8px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.cmp > div:last-child { text-align: right; font-size: 13px; }

@@ -7,17 +7,21 @@ import { analyzeAll, isOneVOne, slim } from "./analysis.js";
 import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTracked, weekly } from "./history.js";
 import { insights, worstMatchup } from "./insights.js";
 import { TOP_PLAYERS, recommend, sampleRows, slimPlayer } from "./decks.js";
-import { eloSummary, skillScore } from "./skill.js";
+import { eloSummary, skillByDay, skillScore } from "./skill.js";
+import { bindChart, lineChart } from "./chart.js";
+import { buildBenchmarks, compare, deckInMeta, peerTags } from "./bench.js";
 import { extractFrames } from "./video.js";
 import { review } from "./coach.js";
 
-const META_MAX_AGE_MS = 24 * 3600 * 1000;
+const WEEK_MS = 7 * 24 * 3600 * 1000; // top-player decks and comparison data refresh weekly
 const state = {
   config: null,     // { token, tag, claudeKey, inDepth }
   history: emptyHistory(),
   player: null,
   catalog: null,
-  meta: null,       // { rows, fetchedAt }
+  meta: null,       // { rows, fetchedAt }: decks top players are using
+  bench: null,      // { peers, wincons, fetchedAt }: players at your level
+  refreshing: false,
   reports: {},      // battle id -> coaching report
   analyzed: [],
   insights: null,
@@ -86,28 +90,58 @@ async function sync() {
   // Coaching reports are only kept for battles still held in full detail.
   const kept = new Set(state.history.full.map((b) => b.id));
   state.reports = Object.fromEntries(Object.entries(state.reports).filter(([id]) => kept.has(id)));
+  derive();
+  state.history = { ...state.history, skill_days: { ...state.history.skill_days, ...skillByDay(state.analyzed) } };
   await Promise.all([
     db.save("catalog", state.catalog), db.save("player", state.player),
     db.save("history", state.history), db.save("reports", state.reports),
   ]);
-  derive();
   return result.added;
 }
 
-// Sample what the top Ranked players are playing (1 + TOP_PLAYERS requests, 5 at a time).
-async function refreshMeta(onProgress) {
-  const { token } = state.config;
-  const tags = (await api.getTopPlayers(token, TOP_PLAYERS)).map((p) => p.tag);
-  const logs = [];
+// Battle logs for a list of players, 5 requests at a time.
+async function fetchLogs(tags, onProgress) {
+  const queue = [...tags], logs = [];
   const worker = async () => {
-    while (tags.length) {
-      logs.push(await api.getBattlelog(token, tags.pop()));
-      onProgress(logs.length / TOP_PLAYERS);
+    while (queue.length) {
+      logs.push(await api.getBattlelog(state.config.token, queue.pop()));
+      onProgress(logs.length / tags.length);
     }
   };
   await Promise.all(Array.from({ length: 5 }, worker));
-  state.meta = { rows: sampleRows(logs), fetchedAt: Date.now() };
+  return logs;
+}
+
+// Sample what the top Ranked players are playing (1 + TOP_PLAYERS requests).
+async function refreshMeta(onProgress) {
+  const tags = (await api.getTopPlayers(state.config.token, TOP_PLAYERS)).map((p) => p.tag);
+  state.meta = { rows: sampleRows(await fetchLogs(tags, onProgress)), fetchedAt: Date.now() };
   await db.save("meta", state.meta);
+}
+
+// Sample players at your level: the opponents you most recently faced (one request each).
+async function refreshBench() {
+  const logs = await fetchLogs(peerTags(state.analyzed), () => {});
+  state.bench = { ...buildBenchmarks(logs, state.catalog), fetchedAt: Date.now() };
+  await db.save("bench", state.bench);
+}
+
+// Once a week (or on request) refresh both samples in the background.
+async function weeklyRefresh(force) {
+  const stale = (sample) => !sample || Date.now() - sample.fetchedAt > WEEK_MS;
+  if (state.refreshing || !state.analyzed.length) return;
+  if (!force && !stale(state.bench) && !stale(state.meta)) return;
+  state.refreshing = true;
+  renderInsights();
+  try {
+    if (force || stale(state.bench)) await refreshBench();
+    if (force || stale(state.meta)) await refreshMeta(() => {});
+  } catch (err) {
+    toast(err.message);
+  }
+  state.refreshing = false;
+  renderDecks();
+  renderInsights();
 }
 
 function renderAll() {
@@ -125,6 +159,7 @@ async function refresh() {
   try {
     const added = await sync();
     renderAll();
+    weeklyRefresh(false);
     return added;
   } catch (err) {
     toast(err.message);
@@ -429,6 +464,40 @@ function renderInsights() {
   const weeks = weekly(state.history, state.analyzed);
   const sk = state.skill, elo = state.elo;
   const pts = (n) => (n > 0 ? "win" : n < 0 ? "loss" : "muted");
+  const days = Object.entries(state.history.skill_days).sort(([x], [y]) => (x < y ? -1 : 1))
+    .map(([day, value]) => ({ label: new Date(day + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }), value }));
+  const chart = days.length >= 2
+    ? `<h3 style="margin-top:14px">Progress</h3><div class="muted small">Your skill score at the end of each day you played (trailing 25 games).</div>${lineChart("skill-chart", days, 50)}`
+    : `<div class="muted small" style="margin-top:12px">A progress line appears here once you've played on two different days.</div>`;
+  const cmp = state.bench ? compare(state.bench, state.analyzed) : null;
+  const cmpRow = (name, r, unit, note) => `
+    <div class="cmp"><div>${name}</div><div><b>${r.you}${unit}</b></div><div class="muted">${r.median}${unit}</div>
+    <div class="${r.ahead >= 50 ? "win" : "loss"}">${note(r.ahead)}</div></div>`;
+  const better = (n) => `better than ${n}%`;
+  const comparison = cmp ? `
+    <h3 style="margin-top:14px">Against players at your level</h3>
+    <div class="muted small">Your last 25 games next to the last 25 of ${cmp.peers} players you recently faced.</div>
+    <div class="cmp muted small"><div></div><div>You</div><div>Typical</div><div></div></div>
+    ${cmpRow("Skill score", cmp.skill, "", better)}
+    ${cmpRow("Win rate", cmp.win_rate, "%", better)}
+    ${cmpRow("Elixir leaked", cmp.leak, "", better)}` : "";
+  const inMeta = state.bench ? deckInMeta(state.bench, state.meta?.rows ?? null, state.catalog, state.analyzed, deck.cards) : null;
+  const metaRow = (who, g) => g
+    ? `<div class="cmp"><div>${who}</div><div><b>${g.win_rate}%</b></div><div class="muted">${g.games} games</div><div class="muted">${g.usage === undefined ? "" : `in ${g.usage}% of decks`}</div></div>`
+    : `<div class="cmp"><div>${who}</div><div class="muted">no games</div><div></div><div></div></div>`;
+  const metaCard = inMeta ? `
+    <h2>Your deck in the meta · ${esc(inMeta.win_condition)}</h2>
+    <div class="card">
+      <div class="muted small" style="margin-bottom:4px">How ${esc(inMeta.win_condition)} decks are doing right now, compared with your results.</div>
+      ${metaRow("You", inMeta.you)}
+      ${metaRow("Your level", inMeta.level)}
+      ${metaRow("Top players", inMeta.top)}
+      ${inMeta.level ? `<div class="small" style="margin-top:8px">${esc(inMeta.win_condition)} is the #${inMeta.level.rank} most-played win condition of ${inMeta.level.of} at your level.${inMeta.you.games >= 5 && inMeta.level.games >= 20 ? ` You win ${Math.abs(inMeta.you.win_rate - inMeta.level.win_rate)} points ${inMeta.you.win_rate >= inMeta.level.win_rate ? "more" : "less"} with it than players at your level do.` : ""}</div>` : ""}
+    </div>` : "";
+  const sampleNote = `
+    <div class="muted small" style="margin:10px 4px">${state.refreshing ? "Updating comparison data…"
+      : state.bench ? `Comparison data updated ${ago(new Date(state.bench.fetchedAt).toISOString())}; it refreshes weekly.` : "Comparison data loads after your first battles."}</div>
+    <button id="bench-btn" class="btn" ${state.refreshing ? "disabled" : ""}>Update comparison data now</button>`;
   const edgeText = sk.edge > 0 ? `${sk.edge} points more than` : sk.edge < 0 ? `${-sk.edge} points less than` : "exactly what";
   el.innerHTML = `
     <h2>Skill score</h2>
@@ -441,6 +510,8 @@ function renderInsights() {
       <div class="tip"><div class="ic">🎯</div><div>You win <b>${sk.actual_win_rate}%</b>; your matchups predicted ${sk.expected_win_rate}%. That is ${edgeText} expected. <b class="${pts(sk.results_points)}">${signed(sk.results_points)} pts</b></div></div>
       <div class="tip"><div class="ic">💧</div><div><b>${sk.avg_leak}</b> elixir leaked per game on average (1.5 is par). <b class="${pts(sk.elixir_points)}">${signed(sk.elixir_points)} pts</b></div></div>
       <div class="tip"><div class="ic">👑</div><div><b>${signed(sk.crown_diff)}</b> crowns per game on average. <b class="${pts(sk.crown_points)}">${signed(sk.crown_points)} pts</b></div></div>
+      ${chart}
+      ${comparison}
     </div>
 
     <h2>Elo rating</h2>
@@ -452,6 +523,8 @@ function renderInsights() {
       </div>
       <div class="muted small" style="margin-top:10px">Starts at 1500, which stands for a typical opponent at your trophy range. Wins raise it and losses lower it, by more when the matchup was against you. Trophies show how high you've climbed; Elo shows how you're doing against the players you're matched with right now.</div>
     </div>
+
+    ${metaCard}
 
     <h2>Last ${o.games} battles</h2>
     <div class="tiles">
@@ -497,7 +570,10 @@ function renderInsights() {
         <div class="pct">${w.win_rate}%</div>
         <div class="tr ${w.trophy_change > 0 ? "win" : w.trophy_change < 0 ? "loss" : ""}">${signed(w.trophy_change)}</div>
         <div class="tr">${w.elo ?? "–"}</div>
-      </div>`).join("")}</div>`;
+      </div>`).join("")}</div>
+    ${sampleNote}`;
+  bindChart("skill-chart");
+  $("#bench-btn").onclick = () => weeklyRefresh(true);
 }
 
 // ---------- settings ----------
@@ -567,8 +643,6 @@ function switchTab(name) {
   document.querySelectorAll(".tabbar button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
   window.scrollTo(0, 0);
-  const stale = !state.meta || Date.now() - state.meta.fetchedAt > META_MAX_AGE_MS;
-  if (name === "decks" && state.player && stale) loadMeta();
 }
 document.querySelectorAll(".tabbar button").forEach((btn) => { btn.onclick = () => switchTab(btn.dataset.tab); });
 $("#sheet-close").onclick = () => $("#sheet").classList.add("hidden");
@@ -579,12 +653,12 @@ document.addEventListener("click", (e) => {
 
 // ---------- start ----------
 async function start() {
-  const [config, history, player, catalog, meta, reports] = await Promise.all(
-    ["config", "history", "player", "catalog", "meta", "reports"].map(db.load),
+  const [config, history, player, catalog, meta, reports, bench] = await Promise.all(
+    ["config", "history", "player", "catalog", "meta", "reports", "bench"].map(db.load),
   );
   Object.assign(state, {
     config: config ?? null, history: { ...emptyHistory(), ...history }, player: player ?? null,
-    catalog: catalog ?? null, meta: meta ?? null, reports: reports ?? {},
+    catalog: catalog ?? null, meta: meta ?? null, reports: reports ?? {}, bench: bench ?? null,
   });
   derive();
   renderAll();

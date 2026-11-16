@@ -8,7 +8,8 @@ export const FULL_LIMIT = 100;
 export const COMPACT_LIMIT = 200;
 
 // rating: your Elo before the oldest full-detail battle (carried forward as battles age out).
-export const emptyHistory = () => ({ full: [], compact: [], daily: {}, watermark: "", rating: START_RATING });
+// skill_days: skill score per day played, kept for the progress chart.
+export const emptyHistory = () => ({ full: [], compact: [], daily: {}, watermark: "", rating: START_RATING, skill_days: {} });
 
 const compactLine = (a) => ({
   id: a.id, time: a.time, mode: a.mode, result: a.result,
@@ -70,7 +71,7 @@ export function ingest(history, slimBattles, catalog) {
     for (const line of compact.slice(COMPACT_LIMIT)) foldIntoDay(daily, line);
     compact = compact.slice(0, COMPACT_LIMIT);
   }
-  return { history: { full, compact, daily, watermark: full[0].time, rating }, added: fresh.length };
+  return { history: { ...history, full, compact, daily, watermark: full[0].time, rating }, added: fresh.length };
 }
 
 const weekStart = (date) => {

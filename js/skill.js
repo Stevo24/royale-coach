@@ -24,7 +24,7 @@ function parts(battles) {
   };
 }
 
-function score(battles) {
+export function rawScore(battles) {
   const p = parts(battles);
   const confidence = battles.length / (battles.length + PRIOR_GAMES);
   return clamp(50 + (p.results_points + p.elixir_points + p.crown_points) * confidence, 0, 100);
@@ -32,7 +32,7 @@ function score(battles) {
 
 // analyzed: full-detail battles, newest first (at least one).
 export function skillScore(analyzed) {
-  const value = Math.round(score(analyzed));
+  const value = Math.round(rawScore(analyzed));
   const p = parts(analyzed);
   const recent = analyzed.slice(0, TREND_WINDOW), before = analyzed.slice(TREND_WINDOW, 2 * TREND_WINDOW);
   return {
@@ -40,7 +40,7 @@ export function skillScore(analyzed) {
     label: LABELS.find(([cut]) => value >= cut)[1],
     games: analyzed.length,
     // last 20 games compared with the 20 before them
-    trend: before.length === TREND_WINDOW ? Math.round(score(recent) - score(before)) : null,
+    trend: before.length === TREND_WINDOW ? Math.round(rawScore(recent) - rawScore(before)) : null,
     actual_win_rate: Math.round(p.actual),
     expected_win_rate: Math.round(p.expected),
     edge: Math.round(p.actual - p.expected),
@@ -50,6 +50,17 @@ export function skillScore(analyzed) {
     elixir_points: Math.round(p.elixir_points),
     crown_points: Math.round(p.crown_points),
   };
+}
+
+// Skill score at the end of each day you played: your trailing 25 games up to that day.
+// Days are remembered in the history, so the line keeps growing after battles age out.
+export function skillByDay(analyzed) {
+  const days = {};
+  analyzed.forEach((b, i) => {
+    const day = b.time.slice(0, 10);
+    if (!(day in days)) days[day] = Math.round(rawScore(analyzed.slice(i, i + 25))); // i is that day's last game
+  });
+  return days;
 }
 
 // Elo summary across every tier of history.
