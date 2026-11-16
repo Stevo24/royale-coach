@@ -4,7 +4,7 @@ name: Crawl community data
 # which the app downloads. Needs the CR_API_TOKEN repository secret.
 on:
   schedule:
-    - cron: "23 9 * * *"
+    - cron: "23 9 * * *" # 09:23 UTC, about 3:23 am US Central
   workflow_dispatch:
   push:
     branches: [main]
