@@ -6,11 +6,11 @@ A personal Clash Royale coach that runs entirely on your phone. There is no serv
 - **How you played:** a grade measured against the matchup, plus specific fixes.
 - **Skill Score (0-100):** how well you play compared with what your matchups predicted. 50 is par. It is built from three visible parts: results vs expectation, elixir leaked, and crown margin. It compares you with your own matchups, not with other players.
 - **Progress chart:** a line of your Skill Score at the end of each day you played, kept even after old battles are trimmed.
-- **Players at your level:** about once a week the app pulls the public battle logs of the 25 opponents you most recently faced and shows where your Skill Score, win rate and elixir leak sit among them. Only summary numbers are kept, no names or tags.
-- **Your deck in the meta:** win rate and popularity of decks built around your win condition, at your level and among top players, next to your own results.
+- **Players at your level:** where your Skill Score, win rate and elixir leak sit among players in your 1,000-trophy range.
+- **Your deck in the meta:** win rate and popularity of decks built around your win condition (and your exact 8 cards, when enough people play them) at your trophy range and in Ranked, next to your own results.
 - **Elo rating:** starts at 1500 (a typical opponent at your trophy range) and moves after every game, by more when the matchup was against you. Tracked per battle, per session and week by week.
 - **Session and insights:** streaks, tilt alert, win rate by matchup verdict, by opponent win condition and archetype, nemesis cards, upgrade priorities, week-by-week history.
-- **Deck recommendations per mode:** Trophy Road, Ranked, Challenges, Clan War. Samples what the top 40 Ranked players are playing and ranks those decks for your collection (cards owned, your levels, evolutions, closeness to your current deck, your worst matchup).
+- **Deck recommendations per mode:** Trophy Road (decks winning at your own trophy range), Ranked, Challenges, Clan War, ranked for your collection (cards owned, your levels, evolutions, closeness to your current deck, your worst matchup).
 - **In-depth coaching (optional):** pick a screen recording after a game; frames are extracted on the phone and sent to Claude with your own API key for a moment-by-moment breakdown. Always post-game. The video is never stored or uploaded whole.
 
 ## What is kept
@@ -22,6 +22,12 @@ A personal Clash Royale coach that runs entirely on your phone. There is no serv
 | Older | Daily totals: games, wins, losses, trophies |
 
 The whole history stays under about 200 KB. The game's API only exposes your most recent battles (about 25), and with no server nothing collects them while the app is closed, so open the app at least every 25 games to keep an unbroken record.
+
+## Community data (the crawler)
+
+Comparisons and deck recommendations come from a summary file built by a scheduled GitHub Actions job in this repository (`crawler/`, `.github/workflows/crawl.yml`). Once a day it reads about 2,500 public battle logs through the official API, starting from the top Ranked players and members of clans of different strength and following opponents from there. It counts each new battle once and publishes `meta.json` to the `data` branch: per 1,000-trophy range and per mode, the most-played decks with wins and games, win-condition totals, and the spread of skill score, win rate and elixir leak. Fourteen days of runs are combined. No player names or tags are published.
+
+The job needs a Clash Royale API key (allowed IP `45.79.218.79`) saved as the repository secret `CR_API_TOKEN`. The app downloads the file at most once a day. GitHub pauses scheduled jobs in repositories with no activity for 60 days; re-enable it from the Actions tab if that happens.
 
 ## Install on Android
 
@@ -55,12 +61,13 @@ js/cards.js      Card knowledge: win conditions, counters, anti-air (edit freely
 js/analysis.js   Matchup verdict, grade, tips
 js/insights.js   Session and long-term stats
 js/skill.js      Skill Score and Elo summary
-js/bench.js      Comparison with players at your level, deck in the meta
+js/community.js  Comparison with other players, deck in the meta (reads the crawler's file)
 js/chart.js      Progress line chart
 js/decks.js      Deck recommendations per game mode
 js/video.js      Frame extraction from a recording
 js/coach.js      Claude review of a recording
 js/app.js        Screens
+crawler/         Daily crawl of public battle logs (GitHub Actions)
 tests/           node --test
 .github/         Builds the Android APK on every push
 capacitor.config.json  Android wrapper settings

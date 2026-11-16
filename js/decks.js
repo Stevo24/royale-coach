@@ -1,7 +1,7 @@
-// Deck recommendations: what top players are winning with right now,
+// Deck recommendations: what is winning right now at your trophy range and in each mode,
 // ranked by how well each deck fits your own card collection.
 import * as K from "./cards.js";
-import { isOneVOne } from "./analysis.js";
+import { bucketKey } from "./community.js";
 
 // level_cap: challenges and tournaments level every card to tournament standard.
 export const MODES = {
@@ -10,35 +10,19 @@ export const MODES = {
   challenge: { label: "Challenges", types: ["challenge", "tournament"], level_cap: 11 },
   war: { label: "Clan War", types: ["riverRacePvP"], level_cap: null },
 };
-const MODE_BY_TYPE = Object.fromEntries(
+export const MODE_BY_TYPE = Object.fromEntries(
   Object.entries(MODES).flatMap(([key, mode]) => mode.types.map((t) => [t, key])),
 );
 
-export const TOP_PLAYERS = 40;
-const MIN_GAMES = 3;
+const MIN_GAMES = 5;
 const LIST_SIZE = 8;
 const WAR_DECKS = 4;            // war decks can't share cards
 const POINTS_PER_LEVEL = 8;     // one level is roughly 10% stats
 const POINTS_PER_MISSING_EVO = 4;
 
-// Every deck played in the given battle logs, as [mode, deckJson, won]; each battle counted once.
-export function sampleRows(battleLogs) {
-  const seen = new Set();
-  const rows = [];
-  for (const battle of battleLogs.flat()) {
-    const mode = MODE_BY_TYPE[battle.type];
-    if (!mode || !isOneVOne(battle)) continue;
-    const [a, b] = [battle.team[0], battle.opponent[0]];
-    const id = `${battle.battleTime}-${[a.tag, b.tag].sort().join("-")}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    for (const [me, other] of [[a, b], [b, a]]) {
-      const deck = me.cards.map((c) => [c.id, (c.evolutionLevel ?? 0) > 0]).sort((x, y) => x[0] - y[0]);
-      rows.push([mode, JSON.stringify(deck), me.crowns > other.crowns ? 1 : 0]);
-    }
-  }
-  return rows;
-}
+// A deck's identity: its card ids and which of them are evolved, in a fixed order.
+export const deckKey = (cards) =>
+  JSON.stringify(cards.map((c) => [c.id, (c.evolutionLevel ?? 0) > 0 || c.evolved === true]).sort((x, y) => x[0] - y[0]));
 
 // Slim, storable form of the /players payload.
 export function slimPlayer(raw, catalog) {
@@ -110,26 +94,21 @@ function nonOverlapping(decks) {
   return chosen;
 }
 
-export function recommend(rows, player, catalog, worstWincon) {
+// buckets: community data per trophy range and mode (see community.js). Trophy Road uses
+// the bucket for your own trophies, so the decks are ones winning against your opposition.
+export function recommend(buckets, player, catalog, worstWincon) {
   return Object.entries(MODES).map(([key, mode]) => {
-    const stats = new Map();
-    let sampled = 0;
-    for (const [rowMode, deckJson, won] of rows) {
-      if (rowMode !== key) continue;
-      const s = stats.get(deckJson) ?? [0, 0];
-      stats.set(deckJson, [s[0] + won, s[1] + 1]);
-      sampled += 1;
-    }
+    const bucket = buckets[key === "ladder" ? bucketKey(player.trophies) : key];
     let decks = [];
     let unowned = 0;
-    for (const [deckJson, s] of stats) {
-      if (s[1] < MIN_GAMES) continue;
+    for (const [deckJson, stats] of Object.entries(bucket?.decks ?? {})) {
+      if (stats[1] < MIN_GAMES) continue;
       const deck = JSON.parse(deckJson);
       if (deck.some(([id]) => !(id in player.collection))) { unowned += 1; continue; }
-      decks.push(fit(deck, s, mode, player, catalog, worstWincon));
+      decks.push(fit(deck, stats, mode, player, catalog, worstWincon));
     }
     decks.sort((a, b) => b.score - a.score);
     if (key === "war") decks = nonOverlapping(decks);
-    return { key, label: mode.label, level_cap: mode.level_cap, sampled, unowned, decks: decks.slice(0, LIST_SIZE) };
+    return { key, label: mode.label, level_cap: mode.level_cap, sampled: bucket?.deck_total ?? 0, unowned, decks: decks.slice(0, LIST_SIZE) };
   });
 }

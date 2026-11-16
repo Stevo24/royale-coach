@@ -6,22 +6,20 @@ import { HARD_COUNTERS, makeCatalog } from "./cards.js";
 import { analyzeAll, isOneVOne, slim } from "./analysis.js";
 import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTracked, weekly } from "./history.js";
 import { insights, worstMatchup } from "./insights.js";
-import { TOP_PLAYERS, recommend, sampleRows, slimPlayer } from "./decks.js";
+import { deckKey, recommend, slimPlayer } from "./decks.js";
 import { eloSummary, skillByDay, skillScore } from "./skill.js";
 import { bindChart, lineChart } from "./chart.js";
-import { buildBenchmarks, compare, deckInMeta, peerTags } from "./bench.js";
+import { DATA_URL, bucketKey, bucketLabel, compare, deckInMeta } from "./community.js";
 import { extractFrames } from "./video.js";
 import { review } from "./coach.js";
 
-const WEEK_MS = 7 * 24 * 3600 * 1000; // top-player decks and comparison data refresh weekly
+const COMMUNITY_MAX_AGE_MS = 24 * 3600 * 1000; // the crawler publishes once a day
 const state = {
   config: null,     // { token, tag, claudeKey, inDepth }
   history: emptyHistory(),
   player: null,
   catalog: null,
-  meta: null,       // { rows, fetchedAt }: decks top players are using
-  bench: null,      // { peers, wincons, fetchedAt }: players at your level
-  refreshing: false,
+  community: null,  // { data, fetchedAt }: the crawler's summary of other players (data is null before its first run)
   reports: {},      // battle id -> coaching report
   analyzed: [],
   insights: null,
@@ -90,6 +88,7 @@ async function sync() {
   // Coaching reports are only kept for battles still held in full detail.
   const kept = new Set(state.history.full.map((b) => b.id));
   state.reports = Object.fromEntries(Object.entries(state.reports).filter(([id]) => kept.has(id)));
+  if (!state.community || Date.now() - state.community.fetchedAt > COMMUNITY_MAX_AGE_MS) await refreshCommunity();
   derive();
   state.history = { ...state.history, skill_days: { ...state.history.skill_days, ...skillByDay(state.analyzed) } };
   await Promise.all([
@@ -99,49 +98,10 @@ async function sync() {
   return result.added;
 }
 
-// Battle logs for a list of players, 5 requests at a time.
-async function fetchLogs(tags, onProgress) {
-  const queue = [...tags], logs = [];
-  const worker = async () => {
-    while (queue.length) {
-      logs.push(await api.getBattlelog(state.config.token, queue.pop()));
-      onProgress(logs.length / tags.length);
-    }
-  };
-  await Promise.all(Array.from({ length: 5 }, worker));
-  return logs;
-}
-
-// Sample what the top Ranked players are playing (1 + TOP_PLAYERS requests).
-async function refreshMeta(onProgress) {
-  const tags = (await api.getTopPlayers(state.config.token, TOP_PLAYERS)).map((p) => p.tag);
-  state.meta = { rows: sampleRows(await fetchLogs(tags, onProgress)), fetchedAt: Date.now() };
-  await db.save("meta", state.meta);
-}
-
-// Sample players at your level: the opponents you most recently faced (one request each).
-async function refreshBench() {
-  const logs = await fetchLogs(peerTags(state.analyzed), () => {});
-  state.bench = { ...buildBenchmarks(logs, state.catalog), fetchedAt: Date.now() };
-  await db.save("bench", state.bench);
-}
-
-// Once a week (or on request) refresh both samples in the background.
-async function weeklyRefresh(force) {
-  const stale = (sample) => !sample || Date.now() - sample.fetchedAt > WEEK_MS;
-  if (state.refreshing || !state.analyzed.length) return;
-  if (!force && !stale(state.bench) && !stale(state.meta)) return;
-  state.refreshing = true;
-  renderInsights();
-  try {
-    if (force || stale(state.bench)) await refreshBench();
-    if (force || stale(state.meta)) await refreshMeta(() => {});
-  } catch (err) {
-    toast(err.message);
-  }
-  state.refreshing = false;
-  renderDecks();
-  renderInsights();
+// Download the crawler's daily summary of other players (one small file).
+async function refreshCommunity() {
+  state.community = { data: await api.getCommunity(DATA_URL), fetchedAt: Date.now() };
+  await db.save("community", state.community);
 }
 
 function renderAll() {
@@ -159,7 +119,6 @@ async function refresh() {
   try {
     const added = await sync();
     renderAll();
-    weeklyRefresh(false);
     return added;
   } catch (err) {
     toast(err.message);
@@ -399,58 +358,49 @@ function reportHtml(r) {
 }
 
 // ---------- decks ----------
+const communityNote = () => {
+  const d = state.community?.data;
+  return d
+    ? `Community data: ${d.battles.toLocaleString()} battles from the last ${d.window_days} days, updated ${ago(d.updated)}.`
+    : "Community data isn't available yet. It appears after the crawler's first daily run.";
+};
+
 function renderDecks() {
   const el = $("#tab-decks");
   if (!state.player) { el.innerHTML = `<div class="empty">Connect your account in Settings first.</div>`; return; }
-  const refreshBtn = `<button id="meta-btn" class="btn" style="margin:12px 0">${state.meta ? "Refresh top-player decks" : "Load top-player decks"}</button>
-    <div class="progress hidden" id="meta-progress"><div></div></div>`;
-  if (!state.meta) {
-    el.innerHTML = `<div class="empty">Deck recommendations come from what the top ${TOP_PLAYERS} Ranked players are playing right now, matched to your card levels.</div>${refreshBtn}`;
-  } else {
-    const modes = recommend(state.meta.rows, state.player, state.catalog, worstMatchup(state.insights, HARD_COUNTERS));
-    const mode = modes.find((m) => m.key === state.mode);
-    const levelLine = mode.level_cap
-      ? `Cards are capped at level ${mode.level_cap} here, so what matters is owning the cards and having them at ${mode.level_cap}+.`
-      : mode.key === "war"
-        ? "Your own levels count. These decks share no cards, so you can run them together."
-        : "Your own levels count, so decks are ranked by top-player win rate adjusted for your card levels.";
-    const list = mode.decks.length
-      ? mode.decks.map((k, i) => `
-        <div class="card">
-          <div class="row" style="justify-content:space-between;margin-bottom:8px">
-            <b>#${i + 1} · ${esc(k.win_condition ?? "No win condition")}</b>
-            <span class="muted small">${esc(k.archetype)} · ${k.avg_elixir} avg</span>
-          </div>
-          ${deckGrid(k.cards)}
-          <div class="deck-stats">
-            <div><b class="${k.win_rate >= 50 ? "win" : "loss"}">${k.win_rate}%</b><span class="muted">top-player win rate</span></div>
-            <div><b>${k.games}</b><span class="muted">games</span></div>
-            <div><b>${k.your_avg_level}</b><span class="muted">your avg level</span></div>
-          </div>
-          ${k.notes.map((n) => tipHtml({ kind: "info", text: n })).join("")}
-          <a class="btn" style="margin-top:10px" href="${esc(k.copy_link)}">Copy into Clash Royale</a>
-        </div>`).join("")
-      : `<div class="empty">No ${esc(mode.label)} deck in this sample that has enough games and only uses cards you own.</div>`;
-    el.innerHTML = `
-      <div class="modes">${modes.map((m) => `<button data-mode="${m.key}" class="${m.key === state.mode ? "active" : ""}">${esc(m.label)}</button>`).join("")}</div>
-      <div class="muted small" style="margin:8px 4px">${levelLine} Based on ${mode.sampled} decks from top Ranked players' recent games, loaded ${ago(new Date(state.meta.fetchedAt).toISOString())}.${mode.unowned ? ` ${mode.unowned} more need cards you don't own.` : ""}</div>
-      ${list}${refreshBtn}`;
-    el.querySelectorAll(".modes button").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; renderDecks(); }; });
-  }
-  $("#meta-btn").onclick = loadMeta;
-}
-
-async function loadMeta() {
-  const btn = $("#meta-btn"), bar = $("#meta-progress");
-  btn.disabled = true;
-  btn.textContent = "Loading…";
-  bar.classList.remove("hidden");
-  try {
-    await refreshMeta((p) => { bar.firstElementChild.style.width = `${Math.round(p * 100)}%`; });
-  } catch (err) {
-    toast(err.message);
-  }
-  renderDecks();
+  const data = state.community?.data;
+  if (!data) { el.innerHTML = `<div class="empty">${communityNote()}</div>`; return; }
+  const modes = recommend(data.buckets, state.player, state.catalog, worstMatchup(state.insights, HARD_COUNTERS));
+  const mode = modes.find((m) => m.key === state.mode);
+  const where = bucketLabel(mode.key === "ladder" ? bucketKey(state.player.trophies) : mode.key);
+  const levelLine = mode.level_cap
+    ? `Cards are capped at level ${mode.level_cap} here, so what matters is owning the cards and having them at ${mode.level_cap}+.`
+    : mode.key === "war"
+      ? "Your own levels count. These decks share no cards, so you can run them together."
+      : "Your own levels count, so decks are ranked by win rate adjusted for your card levels.";
+  const list = mode.decks.length
+    ? mode.decks.map((k, i) => `
+      <div class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <b>#${i + 1} · ${esc(k.win_condition ?? "No win condition")}</b>
+          <span class="muted small">${esc(k.archetype)} · ${k.avg_elixir} avg</span>
+        </div>
+        ${deckGrid(k.cards)}
+        <div class="deck-stats">
+          <div><b class="${k.win_rate >= 50 ? "win" : "loss"}">${k.win_rate}%</b><span class="muted">win rate</span></div>
+          <div><b>${k.games}</b><span class="muted">games</span></div>
+          <div><b>${k.your_avg_level}</b><span class="muted">your avg level</span></div>
+        </div>
+        ${k.notes.map((n) => tipHtml({ kind: "info", text: n })).join("")}
+        <a class="btn" style="margin-top:10px" href="${esc(k.copy_link)}">Copy into Clash Royale</a>
+      </div>`).join("")
+    : `<div class="empty">No deck here yet that has enough games and only uses cards you own.</div>`;
+  el.innerHTML = `
+    <div class="modes">${modes.map((m) => `<button data-mode="${m.key}" class="${m.key === state.mode ? "active" : ""}">${esc(m.label)}</button>`).join("")}</div>
+    <div class="muted small" style="margin:8px 4px">${levelLine} Based on ${mode.sampled.toLocaleString()} decks played in ${esc(where)}.${mode.unowned ? ` ${mode.unowned} more need cards you don't own.` : ""}</div>
+    ${list}
+    <div class="muted small" style="margin:10px 4px">${communityNote()}</div>`;
+  el.querySelectorAll(".modes button").forEach((b) => { b.onclick = () => { state.mode = b.dataset.mode; renderDecks(); }; });
 }
 
 // ---------- insights ----------
@@ -469,35 +419,34 @@ function renderInsights() {
   const chart = days.length >= 2
     ? `<h3 style="margin-top:14px">Progress</h3><div class="muted small">Your skill score at the end of each day you played (trailing 25 games).</div>${lineChart("skill-chart", days, 50)}`
     : `<div class="muted small" style="margin-top:12px">A progress line appears here once you've played on two different days.</div>`;
-  const cmp = state.bench ? compare(state.bench, state.analyzed) : null;
-  const cmpRow = (name, r, unit, note) => `
+  const buckets = state.community?.data?.buckets;
+  const myBucket = bucketKey(state.player.trophies);
+  const cmp = buckets ? compare(buckets[myBucket], state.analyzed) : null;
+  const cmpRow = (name, r, unit) => `
     <div class="cmp"><div>${name}</div><div><b>${r.you}${unit}</b></div><div class="muted">${r.median}${unit}</div>
-    <div class="${r.ahead >= 50 ? "win" : "loss"}">${note(r.ahead)}</div></div>`;
-  const better = (n) => `better than ${n}%`;
+    <div class="${r.ahead >= 50 ? "win" : "loss"}">better than ${r.ahead}%</div></div>`;
   const comparison = cmp ? `
     <h3 style="margin-top:14px">Against players at your level</h3>
-    <div class="muted small">Your last 25 games next to the last 25 of ${cmp.peers} players you recently faced.</div>
+    <div class="muted small">Your last 25 games next to ${cmp.players.toLocaleString()} players at ${esc(bucketLabel(myBucket))}.</div>
     <div class="cmp muted small"><div></div><div>You</div><div>Typical</div><div></div></div>
-    ${cmpRow("Skill score", cmp.skill, "", better)}
-    ${cmpRow("Win rate", cmp.win_rate, "%", better)}
-    ${cmpRow("Elixir leaked", cmp.leak, "", better)}` : "";
-  const inMeta = state.bench ? deckInMeta(state.bench, state.meta?.rows ?? null, state.catalog, state.analyzed, deck.cards) : null;
+    ${cmpRow("Skill score", cmp.skill, "")}
+    ${cmpRow("Win rate", cmp.win_rate, "%")}
+    ${cmpRow("Elixir leaked", cmp.leak, "")}` : "";
+  const inMeta = buckets ? deckInMeta(buckets, myBucket, state.analyzed, deck.cards, deckKey(deck.cards)) : null;
   const metaRow = (who, g) => g
-    ? `<div class="cmp"><div>${who}</div><div><b>${g.win_rate}%</b></div><div class="muted">${g.games} games</div><div class="muted">${g.usage === undefined ? "" : `in ${g.usage}% of decks`}</div></div>`
+    ? `<div class="cmp"><div>${who}</div><div><b>${g.win_rate}%</b></div><div class="muted">${g.games.toLocaleString()} games</div><div class="muted">${g.usage === undefined ? "" : `in ${g.usage}% of decks`}</div></div>`
     : `<div class="cmp"><div>${who}</div><div class="muted">no games</div><div></div><div></div></div>`;
   const metaCard = inMeta ? `
     <h2>Your deck in the meta · ${esc(inMeta.win_condition)}</h2>
     <div class="card">
-      <div class="muted small" style="margin-bottom:4px">How ${esc(inMeta.win_condition)} decks are doing right now, compared with your results.</div>
+      <div class="muted small" style="margin-bottom:4px">How ${esc(inMeta.win_condition)} decks are doing right now, next to your own results.</div>
       ${metaRow("You", inMeta.you)}
       ${metaRow("Your level", inMeta.level)}
-      ${metaRow("Top players", inMeta.top)}
-      ${inMeta.level ? `<div class="small" style="margin-top:8px">${esc(inMeta.win_condition)} is the #${inMeta.level.rank} most-played win condition of ${inMeta.level.of} at your level.${inMeta.you.games >= 5 && inMeta.level.games >= 20 ? ` You win ${Math.abs(inMeta.you.win_rate - inMeta.level.win_rate)} points ${inMeta.you.win_rate >= inMeta.level.win_rate ? "more" : "less"} with it than players at your level do.` : ""}</div>` : ""}
+      ${metaRow("Ranked", inMeta.ranked)}
+      ${inMeta.exact ? metaRow("Your exact deck", inMeta.exact) : ""}
+      ${inMeta.level ? `<div class="small" style="margin-top:8px;white-space:normal">${esc(inMeta.win_condition)} is the #${inMeta.level.rank} most-played win condition of ${inMeta.level.of} at your level.${inMeta.you.games >= 5 && inMeta.level.games >= 20 ? ` You win ${Math.abs(inMeta.you.win_rate - inMeta.level.win_rate)} points ${inMeta.you.win_rate >= inMeta.level.win_rate ? "more" : "less"} with it than players at your level do.` : ""}</div>` : ""}
     </div>` : "";
-  const sampleNote = `
-    <div class="muted small" style="margin:10px 4px">${state.refreshing ? "Updating comparison data…"
-      : state.bench ? `Comparison data updated ${ago(new Date(state.bench.fetchedAt).toISOString())}; it refreshes weekly.` : "Comparison data loads after your first battles."}</div>
-    <button id="bench-btn" class="btn" ${state.refreshing ? "disabled" : ""}>Update comparison data now</button>`;
+  const sampleNote = `<div class="muted small" style="margin:10px 4px">${communityNote()}</div>`;
   const edgeText = sk.edge > 0 ? `${sk.edge} points more than` : sk.edge < 0 ? `${-sk.edge} points less than` : "exactly what";
   el.innerHTML = `
     <h2>Skill score</h2>
@@ -573,7 +522,6 @@ function renderInsights() {
       </div>`).join("")}</div>
     ${sampleNote}`;
   bindChart("skill-chart");
-  $("#bench-btn").onclick = () => weeklyRefresh(true);
 }
 
 // ---------- settings ----------
@@ -653,12 +601,12 @@ document.addEventListener("click", (e) => {
 
 // ---------- start ----------
 async function start() {
-  const [config, history, player, catalog, meta, reports, bench] = await Promise.all(
-    ["config", "history", "player", "catalog", "meta", "reports", "bench"].map(db.load),
+  const [config, history, player, catalog, reports, community] = await Promise.all(
+    ["config", "history", "player", "catalog", "reports", "community"].map(db.load),
   );
   Object.assign(state, {
     config: config ?? null, history: { ...emptyHistory(), ...history }, player: player ?? null,
-    catalog: catalog ?? null, meta: meta ?? null, reports: reports ?? {}, bench: bench ?? null,
+    catalog: catalog ?? null, reports: reports ?? {}, community: community ?? null,
   });
   derive();
   renderAll();

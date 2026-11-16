@@ -6,10 +6,11 @@ import { HARD_COUNTERS, makeCatalog } from "../js/cards.js";
 import { analyzeAll, isOneVOne, slim } from "../js/analysis.js";
 import { COMPACT_LIMIT, FULL_LIMIT, emptyHistory, ingest, olderRecords, totalTracked, weekly } from "../js/history.js";
 import { insights, worstMatchup } from "../js/insights.js";
-import { recommend, sampleRows, slimPlayer } from "../js/decks.js";
+import { deckKey, recommend, slimPlayer } from "../js/decks.js";
 import { buildRequest, parseReport } from "../js/coach.js";
 import { eloSummary, rawScore, skillByDay, skillScore } from "../js/skill.js";
-import { buildBenchmarks, compare, deckInMeta, peerTags } from "../js/bench.js";
+import { bucketKey, bucketLabel, compare, deckInMeta } from "../js/community.js";
+import { addLog, emptyRun, finishRun, publish } from "../crawler/aggregate.js";
 import { normalizeTag } from "../js/api.js";
 
 const catalog = makeCatalog(fx.cardsPayload());
@@ -165,18 +166,61 @@ test("history tiers: 100 full, 200 compact, the rest as daily totals", () => {
   assert.ok(JSON.stringify(h).length < 200_000, `history is ${JSON.stringify(h).length} bytes`);
 });
 
-test("deck recommendations fit your collection", () => {
+// Community data as the crawler would publish it from the fixture battles.
+function crawl(logs, since = "2000-01-01T00:00:00Z") {
+  const run = emptyRun(), seen = new Set(), opponents = [];
+  for (const log of logs) opponents.push(...addLog(run, log, catalog, since, seen));
+  return { run: finishRun(run), opponents };
+}
+const proLogs = [fx.metaBattles(now), fx.metaBattles(now)]; // the same battles seen in two players' logs
+const community = publish([crawl(proLogs).run], new Date(now).toISOString());
+
+test("crawler: counts each battle once, groups by trophy range and mode", () => {
+  const { run, opponents } = crawl(proLogs);
+  assert.equal(run.battles, fx.metaBattles(now).length);
+  assert.equal(opponents.length, 2 * fx.metaBattles(now).length);
+  assert.deepEqual(Object.keys(run.buckets).sort(), ["challenge", "ranked", "t9000", "war"]);
+  assert.equal(run.buckets.t9000.deck_total, 2 * 12);         // both sides of 12 Trophy Road battles
+  assert.deepEqual(run.buckets.t9000.wincons["Hog Rider"], [5, 8]);
+  assert.equal(run.players, 2);                                // each log has 10+ ladder battles
+  assert.equal(run.buckets.t9000.skill.reduce((a, b) => a + b, 0), 2);
+
+  // battles at or before the cut-off are not counted again on the next run
+  const later = crawl(proLogs, new Date(now).toISOString().replace(/\.\d+Z$/, "Z"));
+  assert.equal(later.run.battles, 0);
+  assert.equal(later.run.players, 2);                          // players are still scored
+
+  // 2v2 and other modes are ignored; short logs give no player score
+  const mixed = crawl([fx.battlelog(now).slice(0, 5).concat(fx.battlelog(now).at(-1))]);
+  assert.equal(mixed.run.battles, 5);
+  assert.equal(mixed.run.players, 0);
+});
+
+test("crawler: published file keeps well-played decks and sums runs", () => {
+  const one = crawl(proLogs).run;
+  const twice = publish([one, one], "x");
+  assert.equal(twice.battles, 2 * one.battles);
+  assert.deepEqual(twice.buckets.t9000.wincons["Hog Rider"], [10, 16]);
+  assert.equal(community.window_days, 14);
+  // 5-game decks are published, 3- and 4-game decks are not
+  const ladder = Object.values(community.buckets.t9000.decks).map((r) => r[1]).sort();
+  assert.deepEqual(ladder, [5, 5]);
+  assert.ok(JSON.stringify(community).length < 6000);
+});
+
+test("deck recommendations fit your collection and trophy range", () => {
   const player = slimPlayer(fx.PLAYER, catalog);
-  const logs = [fx.metaBattles(now), fx.metaBattles(now)]; // same battles seen in two players' logs
-  const rows = sampleRows(logs);
-  assert.equal(rows.length, 2 * fx.metaBattles(now).length);
-  const modes = Object.fromEntries(recommend(rows, player, catalog, "Golem").map((m) => [m.key, m]));
+  assert.equal(bucketKey(player.trophies), "t9000");
+  assert.equal(bucketLabel("t9000"), "9,000–9,999 trophies");
+  const big = publish(Array(3).fill(crawl(proLogs).run), "x");  // enough games for every deck
+  const modes = Object.fromEntries(recommend(big.buckets, player, catalog, "Golem").map((m) => [m.key, m]));
 
   const ladder = modes.ladder;
+  assert.equal(ladder.sampled, 72);
   assert.equal(ladder.unowned, 1); // the Lava Hound deck
   const top = ladder.decks[0];
   assert.equal(top.win_condition, "Hog Rider");
-  assert.deepEqual([top.wins, top.games], [4, 5]);
+  assert.deepEqual([top.wins, top.games], [12, 15]);
   assert.ok(top.notes.some((n) => n.includes("2 card swaps")));
   const golem = ladder.decks.find((d) => d.win_condition === "Golem");
   assert.ok(golem.your_avg_level < 14 && golem.score < top.score);
@@ -189,6 +233,10 @@ test("deck recommendations fit your collection", () => {
   const warIds = modes.war.decks.flatMap((d) => d.cards.map((c) => c.id));
   assert.ok(modes.war.decks.length >= 2);
   assert.equal(warIds.length, new Set(warIds).size);
+
+  // a player in a trophy range nobody was sampled in gets an empty list, not an error
+  const low = recommend(big.buckets, { ...player, trophies: 3200 }, catalog, null).find((m) => m.key === "ladder");
+  assert.deepEqual([low.sampled, low.decks.length], [0, 0]);
 });
 
 test("coaching request and report parsing", () => {
@@ -220,31 +268,28 @@ test("skill history: one point per day played, kept after battles age out", () =
 });
 
 test("comparison with players at your level", () => {
-  assert.equal(peerTags(analyzed).length, 12);
-  // three peers: one wins everything, one loses everything, one is the fixture player
   const allWins = fx.longHistory(15, now).map((b) => ({ ...b, team: [{ ...b.team[0], crowns: 2, elixirLeaked: 0.5 }], opponent: [{ ...b.opponent[0], crowns: 0 }] }));
   const allLosses = fx.longHistory(15, now).map((b) => ({ ...b, team: [{ ...b.team[0], crowns: 0, elixirLeaked: 5 }], opponent: [{ ...b.opponent[0], crowns: 2 }] }));
-  const tooFew = fx.longHistory(4, now);
-  const bench = buildBenchmarks([allWins, allLosses, fx.battlelog(now), tooFew, []], catalog);
-  assert.equal(bench.peers.length, 3);                       // short and empty logs give no peer
-  assert.ok(bench.peers[0].score > 50 && bench.peers[1].score < 50);
-  assert.deepEqual(Object.keys(bench.peers[0]).sort(), ["leak", "score", "win_rate"]); // no names or tags kept
-  const games = Object.values(bench.wincons).reduce((n, r) => n + r[1], 0);
-  assert.equal(games, 15 + 15 + 12 + 4);
+  const data = publish([crawl([allWins, allLosses, fx.battlelog(now)]).run], "x");
+  const bucket = data.buckets.t9000;
+  assert.equal(bucket.players, 3);
 
-  const c = compare(bench, analyzed);
-  assert.equal(c.peers, 3);
+  const c = compare(bucket, analyzed);
+  assert.equal(c.players, 3);
   assert.equal(c.skill.you, Math.round(rawScore(analyzed.slice(0, 25))));
-  assert.equal(c.skill.ahead, 33);                           // ahead of the all-losses peer only (ties don't count)
+  assert.equal(c.skill.ahead, 33);                           // ahead of the all-losses player only (ties don't count)
+  assert.equal(c.skill.median, c.skill.you);                 // the middle player has your games
   assert.equal(c.leak.ahead, 33);
-  assert.equal(compare({ peers: [], wincons: {} }, analyzed), null);
+  assert.equal(c.win_rate.ahead, 33);
+  assert.equal(compare(undefined, analyzed), null);
+  assert.equal(compare(data.buckets.challenge, analyzed), null);
 
-  const rows = sampleRows([fx.metaBattles(now)]);
-  const m = deckInMeta(bench, rows, catalog, analyzed, analyzed[0].me.cards);
+  const mine = analyzed[0].me.cards;
+  const m = deckInMeta(data.buckets, "t9000", analyzed, mine, deckKey(mine));
   assert.equal(m.win_condition, "Hog Rider");
   assert.equal(m.you.games, 12);
-  assert.equal(m.level, null);                               // nobody in this sample faced a Hog deck
-  assert.ok(m.top.games > 0 && m.top.rank >= 1);
-  const golem = deckInMeta(bench, null, catalog, analyzed, analyzed.find((b) => b.opponent.main_win_condition === "Golem").opponent.cards);
-  assert.ok(golem.level.games > 0 && golem.level.usage > 0 && golem.top === null);
+  assert.ok(m.level.games >= 12 && m.level.rank === 1 && m.level.usage > 0);
+  assert.equal(m.ranked, null);                              // no Ranked games in this sample
+  assert.equal(m.exact.games, 27);                           // your exact 8 cards with the same evolutions
+  assert.equal(deckInMeta(data.buckets, "t3000", analyzed, mine, deckKey(mine)).level, null);
 });

@@ -33,6 +33,16 @@ const tagPath = (tag) => encodeURIComponent(`#${tag.replace("#", "")}`);
 export const getCards = (token) => get(token, "/cards");
 export const getPlayer = (token, tag) => get(token, `/players/${tagPath(tag)}`);
 export const getBattlelog = (token, tag) => get(token, `/players/${tagPath(tag)}/battlelog`);
-// Current Ranked (Path of Legends) global leaderboard.
-export const getTopPlayers = async (token, limit) =>
-  (await get(token, `/locations/global/pathoflegend/players?limit=${limit}`)).items;
+
+// The community summary file published by the repository's crawler. Null until its first run.
+export async function getCommunity(url) {
+  let res;
+  try {
+    res = await fetch(url);
+  } catch {
+    throw new Error("Couldn't download the community data. Check your connection and try again.");
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Community data error ${res.status}`);
+  return res.json();
+}

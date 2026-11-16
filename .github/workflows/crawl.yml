@@ -1,0 +1,53 @@
+name: Crawl community data
+
+# Once a day: crawl public battle logs and publish a summary to the `data` branch,
+# which the app downloads. Needs the CR_API_TOKEN repository secret.
+on:
+  schedule:
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["crawler/**", ".github/workflows/crawl.yml"]
+
+permissions:
+  contents: write
+
+concurrency: crawl
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch the previous data
+        run: |
+          if git ls-remote --exit-code --heads origin data > /dev/null; then
+            git clone --quiet --depth 1 --branch data "https://github.com/${{ github.repository }}" out
+            rm -rf out/.git
+          else
+            mkdir out
+          fi
+
+      - name: Crawl
+        env:
+          CR_API_TOKEN: ${{ secrets.CR_API_TOKEN }}
+        run: |
+          test -n "$CR_API_TOKEN" || { echo "::error::Add the CR_API_TOKEN secret (Settings > Secrets and variables > Actions)."; exit 1; }
+          node crawler/crawl.js out
+
+      # The data branch is replaced each time, so the repository doesn't grow.
+      - name: Publish to the data branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          git init --quiet --initial-branch data
+          git add -A
+          git -c user.name="royale-coach crawler" -c user.email="actions@users.noreply.github.com" commit --quiet -m "Community data $(date -u +%F)"
+          git push --quiet --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}" data
