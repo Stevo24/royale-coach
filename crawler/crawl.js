@@ -7,7 +7,7 @@ import { makeCatalog } from "../js/cards.js";
 import { WINDOW_DAYS, addLog, emptyRun, finishRun, publish } from "./aggregate.js";
 
 const BASE = process.env.CR_API_BASE ?? "https://proxy.royaleapi.dev/v1"; // override only for local testing
-const TOKEN = process.env.CR_API_TOKEN;
+const TOKEN = process.env.CR_API_TOKEN?.trim();
 const OUT = process.argv[2];
 const PLAYERS_PER_RUN = Number(process.env.CRAWL_PLAYERS ?? 2500);
 const CONCURRENCY = 6;
@@ -20,6 +20,11 @@ process.on("uncaughtException", (err) => { console.log(`::error::${err.message}`
 
 if (!TOKEN) throw new Error("CR_API_TOKEN is not set. Add it as a repository secret.");
 if (!OUT) throw new Error("Usage: node crawler/crawl.js <output-dir>");
+// A real key is a long token in three dot-separated parts starting with "eyJ". Say so early if it isn't.
+if (!TOKEN.startsWith("eyJ") || TOKEN.split(".").length !== 3) {
+  throw new Error(`CR_API_TOKEN doesn't look like a Clash Royale API key: it is ${TOKEN.length} characters, ${TOKEN.split(".").length} part(s), and ${TOKEN.startsWith("eyJ") ? "starts" : "does not start"} with "eyJ". Copy the whole token from developer.clashroyale.com > My Account > your key.`);
+}
+console.log(`key: ${TOKEN.length} characters`);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const tagPath = (tag) => encodeURIComponent(tag);
